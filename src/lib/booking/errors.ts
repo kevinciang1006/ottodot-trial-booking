@@ -54,3 +54,19 @@ export function isUniqueViolation(error: unknown, constraint: string): boolean {
   const candidate = error as { code?: unknown; constraint?: unknown }
   return candidate.code === PG_UNIQUE_VIOLATION && candidate.constraint === constraint
 }
+
+/** Maps a thrown value to an HTTP response. This is the ONLY error logic in the
+ *  API layer — route handlers just call it. */
+export function toErrorResponse(error: unknown): Response {
+  if (isDomainError(error)) {
+    return Response.json(
+      { error: { code: error.code, message: error.message } },
+      { status: error.status },
+    )
+  }
+  console.error('Unhandled error in route handler:', error)
+  return Response.json(
+    { error: { code: 'internal_error', message: 'Something went wrong.' } },
+    { status: 500 },
+  )
+}
