@@ -4,11 +4,13 @@ import { PayButtons } from '@/app/_components/pay-buttons'
 import { withTransaction } from '@/lib/db'
 import { getBooking, listTrialClasses } from '@/lib/booking/service'
 import { NotFoundError } from '@/lib/booking/errors'
-import type { Booking, TrialClassSummary } from '@/lib/types'
+import type { Booking, BookingStatus, TrialClassSummary } from '@/lib/types'
 
 export const dynamic = 'force-dynamic'
 
-const STATUS_COPY: Record<string, string> = {
+// Keyed by BookingStatus, not string: adding a status to the enum without copy
+// for it becomes a type error rather than a silently blank paragraph.
+const STATUS_COPY: Record<BookingStatus, string> = {
   pending_payment: 'Awaiting payment.',
   confirmed: 'Confirmed. Your child has a seat in this class.',
   payment_failed:
