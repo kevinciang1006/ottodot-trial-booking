@@ -127,6 +127,7 @@ describe('payForBooking', () => {
     expect(first.booking.status).toBe('confirmed')
     expect(second.booking.status).toBe('confirmed')
     expect(second.charged).toBe(true)
+    expect(second.outcome).toBe(first.outcome)
 
     const { rows } = await getPool().query<{ n: number }>(
       'SELECT count(*)::int AS n FROM payment_attempts WHERE booking_id = $1',

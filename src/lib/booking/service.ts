@@ -242,18 +242,30 @@ async function recordAttempt(
     providerRef: string | null
   },
 ): Promise<void> {
-  await client.query(
-    `INSERT INTO payment_attempts
-       (booking_id, idempotency_key, outcome, amount_cents, provider_ref)
-     VALUES ($1, $2, $3, $4, $5)`,
-    [
-      input.bookingId,
-      input.idempotencyKey,
-      input.outcome,
-      input.amountCents,
-      input.providerRef,
-    ],
-  )
+  try {
+    await client.query(
+      `INSERT INTO payment_attempts
+         (booking_id, idempotency_key, outcome, amount_cents, provider_ref)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [
+        input.bookingId,
+        input.idempotencyKey,
+        input.outcome,
+        input.amountCents,
+        input.providerRef,
+      ],
+    )
+  } catch (error) {
+    // The lookup SELECT in payForBooking runs under READ COMMITTED and cannot
+    // see a peer transaction's uncommitted insert, so two requests reusing the
+    // same key on DIFFERENT bookings both pass that check and both land here.
+    // The unique index is what actually decides under concurrency: the loser
+    // must surface as a typed 409, never a raw SQLSTATE 23505.
+    if (isUniqueViolation(error, 'payment_attempts_idem')) {
+      throw new IdempotencyKeyReuseError()
+    }
+    throw error
+  }
 }
 
 async function setStatus(
@@ -274,10 +286,15 @@ async function latestOutcome(
   client: PoolClient,
   bookingId: string,
 ): Promise<PaymentOutcome | null> {
+  // At most one payment_attempts row exists per booking in this design, so
+  // this ORDER BY is a safety net rather than a guarantee of determinism: `id`
+  // is a random gen_random_uuid() and `created_at` defaults to the enclosing
+  // transaction's start time, so two rows written in one transaction would
+  // tie on created_at and then order randomly on id anyway.
   const result = await client.query<{ outcome: PaymentOutcome }>(
     `SELECT outcome FROM payment_attempts
       WHERE booking_id = $1
-      ORDER BY created_at DESC, id DESC
+      ORDER BY created_at DESC
       LIMIT 1`,
     [bookingId],
   )
@@ -296,6 +313,12 @@ async function latestOutcome(
  * the race loser charged for a class they never got, and recovery would become
  * a refund workflow. Splitting authorize from capture moves the money decision
  * after the seat decision, so the loser's authorization is simply voided.
+ *
+ * Accepted tradeoff: capture() (and, on the race-lost path, voidAuthorization())
+ * run while the class row is still locked, so on a hot class every claimant
+ * queues behind the current claimant's gateway round-trip, and a hung gateway
+ * call pins the seat gate for as long as it hangs. That is inherent to
+ * deciding the money outcome inside the seat transaction rather than after it.
  */
 export async function payForBooking(
   client: PoolClient,
@@ -328,7 +351,13 @@ export async function payForBooking(
   }
 
   // Idempotency key. The unique index on payment_attempts.idempotency_key is
-  // GLOBAL, so a key seen before may belong to another booking entirely.
+  // GLOBAL, so a key seen before may belong to another booking entirely. This
+  // SELECT distinguishes the two cases under normal sequencing — same-booking
+  // replay (return the prior outcome below) vs. cross-booking reuse (a caller
+  // bug) — but it runs under READ COMMITTED and cannot see a concurrent peer's
+  // uncommitted insert. Two requests racing on one key across different
+  // bookings both read no prior row here; the payment_attempts_idem unique
+  // index inside recordAttempt is what actually decides who wins.
   const priorResult = await client.query<{
     booking_id: string
     outcome: PaymentOutcome
@@ -405,13 +434,27 @@ export async function payForBooking(
     )
   }
 
+  // Recorded BEFORE capture(), unlike the race-lost path above: if capture()
+  // ran first and this insert then failed (e.g. a concurrent cross-booking
+  // key reuse hitting payment_attempts_idem), the card would already be
+  // charged with no payment_attempts row and the booking stuck in
+  // pending_payment. Recording first means a failure here instead leaves an
+  // uncaptured authorization, which simply expires.
+  try {
+    await recordAttempt(client, {
+      bookingId: bookingRow.id,
+      idempotencyKey: input.idempotencyKey,
+      outcome: 'captured',
+      amountCents: priceRow.price_cents,
+      providerRef: auth.providerRef,
+    })
+  } catch (error) {
+    // The attempt was never recorded, so the authorization is still open —
+    // neither captured nor voided. Release it before propagating so nothing
+    // is stranded.
+    await voidAuthorization(auth.providerRef)
+    throw error
+  }
   await capture(auth.providerRef)
-  await recordAttempt(client, {
-    bookingId: bookingRow.id,
-    idempotencyKey: input.idempotencyKey,
-    outcome: 'captured',
-    amountCents: priceRow.price_cents,
-    providerRef: auth.providerRef,
-  })
   return toPayResult(await setStatus(client, bookingRow.id, 'confirmed'), 'captured')
 }
