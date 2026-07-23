@@ -1,16 +1,12 @@
 import { withTransaction } from '@/lib/db'
 import { createBooking } from '@/lib/booking/service'
-import { ValidationError, toErrorResponse } from '@/lib/booking/errors'
+import { ValidationError, isRecord, toErrorResponse } from '@/lib/booking/errors'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
 // Type predicate rather than an `as` cast: narrows `unknown` to an indexable
 // record without asserting anything about its shape.
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null
-}
-
 export async function POST(request: Request): Promise<Response> {
   try {
     const body: unknown = await request.json().catch(() => null)

@@ -70,3 +70,13 @@ export function toErrorResponse(error: unknown): Response {
     { status: 500 },
   )
 }
+
+/**
+ * Narrows a parsed JSON body to an indexable record without a cast.
+ * Every property then reads as `unknown`, which forces each route to check the
+ * field's type explicitly before use — so a malformed body produces a typed
+ * ValidationError (400) rather than a TypeError (500).
+ */
+export function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null
+}
