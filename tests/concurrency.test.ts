@@ -4,9 +4,13 @@ import type { BookingStatus } from '@/lib/types'
 import { IdempotencyKeyReuseError } from '@/lib/booking/errors'
 import { bookAsUser, CLASSES, payAsUser, STUDENTS } from './setup'
 
-function tally(statuses: BookingStatus[]): Record<string, number> {
-  return statuses.reduce<Record<string, number>>((acc, status) => {
-    acc[status] = (acc[status] ?? 0) + 1
+/** Tallies any string-like field (booking status, payment outcome, ...) by its
+ *  stringified value. Widened beyond BookingStatus so the same helper can also
+ *  tally PaymentOutcome | null without a second, near-duplicate function. */
+function tally(values: readonly (string | null)[]): Record<string, number> {
+  return values.reduce<Record<string, number>>((acc, value) => {
+    const key = String(value)
+    acc[key] = (acc[key] ?? 0) + 1
     return acc
   }, {})
 }
@@ -59,6 +63,15 @@ describe('overbooking under load', () => {
       cancelled_class_full: 2,
     })
     expect(results.filter((r) => r.charged)).toHaveLength(4)
+
+    // The `charged` assertion above is tautological: toPayResult derives
+    // `charged` straight from `booking.status === 'confirmed'`, so it merely
+    // restates the status tally two lines up rather than proving no money
+    // moved for the losers. Pin the actual payment outcomes too.
+    expect(tally(results.map((r) => r.outcome))).toEqual({
+      captured: 4,
+      voided: 2,
+    })
   })
 })
 
@@ -93,22 +106,73 @@ describe('cross-booking idempotency-key reuse under concurrency', () => {
       // with the same idempotency_key — behind A's still-open transaction.
       const pending = payAsUser(booking2.id, sharedKey, 'pm_ok')
 
-      // Give the second call a moment to reach and block on the insert before
-      // we commit A. This is not required for correctness (the assertion
-      // below holds regardless of interleaving), but it keeps the scenario
-      // honest to the brief: B must have already passed its SELECT before A
-      // commits.
-      await new Promise((resolve) => setTimeout(resolve, 50))
+      // Attach the rejection expectation immediately, before any further
+      // await. If B ever rejects early for a reason other than the intended
+      // one (see the polling wait below), Node fires `unhandledRejection`
+      // before a handler exists whenever the handler is attached late, and
+      // Vitest reports suite-level noise on top of the real assertion
+      // failure — turning one clean failure into a confusing one.
+      const assertion = expect(pending).rejects.toBeInstanceOf(IdempotencyKeyReuseError)
 
+      // Wait until B is actually parked on A's uncommitted index entry,
+      // rather than sleeping and hoping. `payForBooking` can throw
+      // IdempotencyKeyReuseError from TWO places: its lookup SELECT (the
+      // sequential path, already covered by tests/booking.test.ts) and
+      // recordAttempt's INSERT catch (the concurrent path, which is the only
+      // reason this test exists) — and both throw the identical error. If B
+      // is slow to reach its INSERT (a loaded machine, a cold pool) and a
+      // fixed sleep elapses first, A commits before B blocks, B's SELECT then
+      // sees A's committed row, and B throws from the SELECT branch instead.
+      // The assertion above would still pass, but the test would have gone
+      // green while covering nothing new. Poll pg_stat_activity for the
+      // observable state instead: B waits with wait_event_type = 'Lock' and
+      // wait_event = 'transactionid'.
+      const deadline = Date.now() + 5_000
+      let blocked = false
+      while (Date.now() < deadline && !blocked) {
+        const { rows } = await getPool().query<{ n: number }>(
+          `SELECT count(*)::int AS n FROM pg_stat_activity
+            WHERE datname = current_database()
+              AND wait_event_type = 'Lock' AND wait_event = 'transactionid'`,
+        )
+        blocked = (rows[0]?.n ?? 0) > 0
+        if (!blocked) await new Promise((resolve) => setTimeout(resolve, 10))
+      }
+      expect(blocked, 'B must block on the unique index before A commits').toBe(true)
+
+      // Now that B is genuinely blocked on A's uncommitted row, commit A.
+      // B's insert then fails on payment_attempts_idem. That violation must
+      // surface as the typed domain error, never as a raw SQLSTATE 23505.
       await clientA.query('COMMIT')
 
-      // Now that A has committed, B's insert fails on payment_attempts_idem.
-      // That violation must surface as the typed domain error, never as a raw
-      // SQLSTATE 23505.
-      await expect(pending).rejects.toBeInstanceOf(IdempotencyKeyReuseError)
+      await assertion
+
+      // The rejection alone doesn't prove the rollback actually happened —
+      // pin the resulting state: booking2 must still be pending_payment, and
+      // payment_attempts must hold exactly one row for the shared key, owned
+      // by booking1.
+      const bookingResult = await getPool().query<{ status: BookingStatus }>(
+        'SELECT status FROM bookings WHERE id = $1',
+        [booking2.id],
+      )
+      expect(bookingResult.rows[0]?.status).toBe('pending_payment')
+
+      const attemptsResult = await getPool().query<{ booking_id: string }>(
+        'SELECT booking_id FROM payment_attempts WHERE idempotency_key = $1',
+        [sharedKey],
+      )
+      expect(attemptsResult.rows.map((row) => row.booking_id)).toEqual([booking1.id])
     } finally {
-      // Always release, even if the assertion above throws — a leaked client
-      // would starve the pool (max 10) for every later test.
+      // `pg` does not reset transaction state on release. If BEGIN or the
+      // INSERT above throws before COMMIT is reached, releasing clientA
+      // without rolling back first would return it to the pool still inside
+      // a transaction, and a later checkout would either warn "there is
+      // already a transaction in progress" or fail with "current transaction
+      // is aborted" — one failure cascading into unrelated tests. Attempt a
+      // rollback first; on the happy path A already committed, so this is
+      // expected to error as a no-op, and that error is deliberately
+      // swallowed.
+      await clientA.query('ROLLBACK').catch(() => {})
       clientA.release()
     }
   }, 15_000)
