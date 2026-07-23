@@ -42,12 +42,18 @@ export async function withTransaction<T>(
     await client.query('BEGIN')
     const result = await fn(client)
     await client.query('COMMIT')
+    client.release()
     return result
   } catch (error) {
-    await client.query('ROLLBACK')
+    // Swallow a rollback failure: if the connection is already broken, letting
+    // that error propagate would replace the caller's typed DomainError (e.g.
+    // DuplicateBookingError) with a generic connection error, turning what
+    // should be a 409 into a 500.
+    await client.query('ROLLBACK').catch(() => {})
+    // Release as broken rather than healthy — a connection that errored
+    // mid-transaction should be destroyed, not returned to the pool for reuse.
+    client.release(true)
     throw error
-  } finally {
-    client.release()
   }
 }
 

@@ -11,7 +11,7 @@ The whole build, driven through a fixed workflow rather than ad-hoc prompting:
 1. **Brainstorm** — pulling apart the take-home brief to work out what it is actually
    grading (four hazards that are one question asked four times: *where do you enforce
    correctness?*) and what would count as scope creep.
-2. **Design spec** — `docs/superpowers/specs/2026-07-23-ottodot-trial-booking-design.md`:
+2. **Design spec** — `docs/design.md`:
    stack, data model, the seat-claim sequence, idempotency semantics, the test
    architecture, and the list of alternatives to reject and why. Written and argued over
    before any code existed.
@@ -47,7 +47,8 @@ and a stranded authorization.
 
 ## One place I disagreed with, corrected, or rejected AI output
 
-<!-- HUMAN: fill this in with the real instance -->
+> ⚠️ **TO BE FILLED IN BEFORE SUBMITTING.**
+<!-- HUMAN: describe the real instance here, in your own words, and delete this notice. -->
 
 ## What I would change about my AI workflow next time
 

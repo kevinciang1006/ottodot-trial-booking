@@ -4,7 +4,7 @@
 A take-home. Graded on backend correctness, edge cases, and explanation —
 explicitly not on frontend polish or feature breadth. Adding features is a
 failure mode, not a bonus. The scope is fixed by
-`docs/superpowers/specs/2026-07-23-ottodot-trial-booking-design.md`.
+`docs/design.md`.
 
 ## Stack — do not substitute
 Next.js 15 App Router, React 19, TypeScript strict. Postgres 16 via

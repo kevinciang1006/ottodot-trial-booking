@@ -99,6 +99,17 @@ describe('cross-booking idempotency-key reuse under concurrency', () => {
         [booking1.id, sharedKey],
       )
 
+      // A is idle-in-transaction, not itself waiting on anything, but its pid
+      // is known and excluded below so the poll can never mistake A for the
+      // blocked party it is trying to observe.
+      const pidResult = await clientA.query<{ pid: number }>(
+        'SELECT pg_backend_pid() AS pid',
+      )
+      const pidA = pidResult.rows[0]?.pid
+      if (pidA === undefined) {
+        throw new Error('could not read pg_backend_pid() for connection A')
+      }
+
       // Start payAsUser for booking2 on its OWN connection, reusing the same
       // key. Its lookup SELECT runs under READ COMMITTED and cannot see A's
       // uncommitted insert, so it passes that check, authorizes against the
@@ -127,13 +138,23 @@ describe('cross-booking idempotency-key reuse under concurrency', () => {
       // green while covering nothing new. Poll pg_stat_activity for the
       // observable state instead: B waits with wait_event_type = 'Lock' and
       // wait_event = 'transactionid'.
+      //
+      // Scoped to sessions other than A (pidA, known above) and other than
+      // this polling connection itself (pg_backend_pid(), evaluated fresh on
+      // whichever pooled connection runs this specific query). Without that
+      // scoping, "any session waiting on a transactionid lock" is only safe
+      // because fileParallelism: false keeps exactly these connections alive;
+      // scoping by pid makes the observation precise rather than relying on
+      // that global invariant holding.
       const deadline = Date.now() + 5_000
       let blocked = false
       while (Date.now() < deadline && !blocked) {
         const { rows } = await getPool().query<{ n: number }>(
           `SELECT count(*)::int AS n FROM pg_stat_activity
             WHERE datname = current_database()
+              AND pid NOT IN ($1, pg_backend_pid())
               AND wait_event_type = 'Lock' AND wait_event = 'transactionid'`,
+          [pidA],
         )
         blocked = (rows[0]?.n ?? 0) > 0
         if (!blocked) await new Promise((resolve) => setTimeout(resolve, 10))

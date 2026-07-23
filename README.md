@@ -89,7 +89,7 @@ curl http://localhost:3000/api/trial-classes/33333333-3333-3333-3333-33333333330
 
 ## Time spent
 
-**Time spent:** <!-- HUMAN: fill in the real number before submitting -->
+**Time spent:** ⚠️ TO BE FILLED IN BEFORE SUBMITTING <!-- HUMAN: replace this entire line's value with the real number -->
 
 ---
 
@@ -265,7 +265,7 @@ never reaches a roster — `getRoster` filters on `status = 'confirmed'`, and so
 |---|---|---|---|
 | Class appears full | Greys out the button | — | — |
 | Duplicate booking | — | Translates 23505 → 409 | `bookings_active_unique` **decides** |
-| Overbooking past capacity | — | Counts under lock | `FOR UPDATE` on the class **decides** |
+| Overbooking past capacity | — | Counts under lock, **decides** `confirmed < capacity` | `FOR UPDATE` on the class serializes claimants |
 | Payment failure off roster | — | Sets `payment_failed`, never locks the class row | Roster query filters `status = 'confirmed'` |
 | Double-charge on replay | Sends a stable key | Returns the prior outcome | `payment_attempts_idem` **decides** |
 
@@ -274,6 +274,17 @@ click; it is never what prevents overbooking, and a class can fill between the p
 rendering and the button being pressed. No check in this build lives in a background job —
 there are no background jobs. Seat holds with a TTL would introduce the first one, and that
 is a stated cut.
+
+Look closely at the overbooking row and it is not like the other three: `FOR UPDATE` only
+serializes claimants onto one queue, it does not itself decide anything. The decision is a
+plain TypeScript comparison, `if (confirmed >= classRow.capacity)` in
+`src/lib/booking/service.ts`, running after the lock is held. That makes overbooking the one
+hazard of the four enforced procedurally — by code that runs under mutual exclusion — rather
+than structurally, by a constraint that holds no matter what code runs on top of it. This is
+a considered tradeoff, not an oversight: the rejected `confirmed_seats` counter +
+`CHECK (confirmed_seats <= capacity)` alternative described in [alternatives
+rejected](#alternatives-rejected) is exactly what would close that gap, at the cost of a
+second source of truth that can drift.
 
 ---
 
@@ -288,6 +299,13 @@ moment: when a booking becomes `confirmed`, inside the transaction that captures
 
 The consequence is honest and stated to the user: B can reach the payment screen for a seat
 that is about to disappear. What must never happen is B being *charged* for it.
+
+- **Booking a full class is permitted, on purpose.** `createBooking` runs no capacity check
+  at all — a `POST /api/bookings` on a 4-of-4 class still returns 201, and that booking is
+  guaranteed to end at `payForBooking` in `cancelled_class_full`. A create-time capacity
+  check would be advisory only: it would decide nothing, since the seat can be taken by
+  someone else between that check and the eventual payment. The UI's greyed-out button
+  already prevents the obviously wasted click; the backend does not need to duplicate it.
 
 ### The sequence
 

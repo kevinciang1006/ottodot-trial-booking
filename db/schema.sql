@@ -24,6 +24,11 @@ CREATE TYPE booking_status AS ENUM (
 -- as an example status, so it is declared rather than silently omitted.
 
 CREATE TYPE payment_status AS ENUM ('authorized', 'captured', 'failed', 'voided');
+-- 'authorized' is declared but never written by this build: the mock gateway's
+-- authorize() result is recorded straight as 'captured' or 'voided' within the
+-- same transaction, so no row is ever left sitting in 'authorized'. A real
+-- provider's webhooks would land rows in this state between authorization and
+-- capture, which is exactly the gap a transactional outbox would close.
 
 CREATE TABLE parents (
   id        uuid PRIMARY KEY DEFAULT gen_random_uuid(),

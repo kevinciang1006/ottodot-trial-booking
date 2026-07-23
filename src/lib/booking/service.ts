@@ -212,14 +212,17 @@ export async function listParentsWithStudents(
 }
 
 /** One message per terminal status, shared by fresh results and idempotent
- *  replays so a replay can never describe the outcome differently. */
-const STATUS_MESSAGES: Record<BookingStatus, string> = {
+ *  replays so a replay can never describe the outcome differently. Also the
+ *  single source of truth for the status copy shown on `/bookings/[id]`, so
+ *  the API response and the page can never describe the same state two
+ *  different ways. */
+export const STATUS_MESSAGES: Record<BookingStatus, string> = {
   pending_payment: 'Awaiting payment.',
   confirmed: 'Payment received. The trial class is confirmed.',
   payment_failed:
     'Payment was declined. No seat was taken and you were not charged. You can try booking again.',
   cancelled_class_full:
-    'This class filled up while your payment was being processed. Your card was authorized but never charged, and the authorization has been released.',
+    'This class filled up while your payment was being processed. Your card was authorized but never charged, and the authorization has been released. You have not been charged anything.',
   cancelled: 'This booking was cancelled.',
 }
 
@@ -411,6 +414,15 @@ export async function payForBooking(
   if (!classRow) throw new NotFoundError('Trial class not found.')
 
   // Counted under the lock, from confirmed bookings — the single source of truth.
+  // This gate is correct only because the FOR UPDATE above and this count are TWO
+  // separate client.query calls, not one. Under READ COMMITTED, each statement in
+  // a transaction takes its own fresh snapshot, so this second statement sees
+  // whatever the lock-holder committed before releasing the lock — including a
+  // winner's just-confirmed booking. Merging the lock and this count into a
+  // single statement (e.g. a CTE that takes FOR UPDATE and counts in the same
+  // query) would take ONE snapshot before the lock is granted, so it would count
+  // as of before waiting rather than after, and would silently reintroduce
+  // overbooking — quite possibly without failing any existing test.
   const countResult = await client.query<{ confirmed: number }>(
     `SELECT count(*)::int AS confirmed
        FROM bookings
