@@ -45,7 +45,9 @@ curl http://localhost:3000/api/trial-classes
 # 2. Nadia is already confirmed on this class — booking her again is a duplicate.
 curl -X POST http://localhost:3000/api/bookings -H 'Content-Type: application/json' -d \
   '{"studentId":"22222222-2222-2222-2222-222222222201","trialClassId":"33333333-3333-3333-3333-333333333303"}'
-# → 409 {"error":{"code":"duplicate_booking", ...}}
+# → 409 {"error":{"code":"duplicate_booking","message":"...","existingBookingId":"...405"}}
+#   existingBookingId points at the live booking that blocked it, so the UI can
+#   redirect the parent there (see Duplicate prevention) instead of dead-ending.
 
 # 3. Ethan claims the race class's last seat.
 curl -X POST http://localhost:3000/api/bookings -H 'Content-Type: application/json' -d \
@@ -251,6 +253,14 @@ index name, and throws `DuplicateBookingError` → HTTP 409.
 The partial predicate is the point. A child who failed payment or lost a race can rebook,
 but can never hold two live bookings for one class.
 
+The 409 is not a dead-end. After the constraint fires, the service does a *recovery read*
+— not a pre-check — to find the live booking that blocked the insert, and returns its id as
+`existingBookingId` on the error. The booking form uses that to redirect the parent to that
+booking: the Pay buttons if it is still `pending_payment`, or its confirmed status if it is
+already `confirmed`. The database still decides; the UI just recovers gracefully instead of
+showing a wall. (The recovery read runs after a `ROLLBACK TO SAVEPOINT`, because a failed
+insert aborts the surrounding transaction.)
+
 ### Payment-failure handling
 
 A declined authorization is handled **without ever locking or writing the class row**: the attempt
@@ -334,6 +344,14 @@ in `cancelled_class_full`. Exactly one confirmation, and A was never charged.
 
 **Lock order is always booking, then class, in every code path.** That fixed order is what
 makes deadlock impossible, and it is written into `CLAUDE.md` as a standing rule.
+
+**Seeing it by hand.** A genuine race needs two simultaneous payments, which is what
+`tests/concurrency.test.ts` fires and asserts — that test is the proof of the concurrent
+guarantee. You can still watch the same *states* in the UI: the seed leaves Fractions Deep
+Dive at 3 of 4 confirmed. Book two different children onto it (both go `pending_payment` —
+pending does not reserve), pay one → `confirmed`, then pay the other → `cancelled_class_full`
+with the "you were not charged" message. Same outcome the race produces, walked one step at
+a time.
 
 ### Why authorize → claim → capture
 

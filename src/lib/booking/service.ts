@@ -69,6 +69,10 @@ export async function createBooking(
   ])
   if (student.rowCount === 0) throw new NotFoundError('Student not found.')
 
+  // Savepoint so the transaction survives a unique violation: a failed statement
+  // aborts the whole transaction, and we need it alive afterwards for the
+  // recovery read below.
+  await client.query('SAVEPOINT create_booking')
   try {
     const result = await client.query<BookingRow>(
       `INSERT INTO bookings (trial_class_id, student_id, status)
@@ -83,7 +87,20 @@ export async function createBooking(
     // The partial unique index decides, not a prior SELECT. A check-then-insert
     // has a TOCTOU window that two concurrent requests can both pass.
     if (isUniqueViolation(error, 'bookings_active_unique')) {
-      throw new DuplicateBookingError()
+      // The constraint has already decided. Undo the failed insert (which
+      // aborted the transaction) and read the live booking that blocked it, so
+      // the caller can point the user at it. This is a recovery read AFTER the
+      // constraint fired — not a pre-check, so there is no TOCTOU window. The
+      // partial unique index guarantees at most one live row, hence LIMIT 1.
+      await client.query('ROLLBACK TO SAVEPOINT create_booking')
+      const existing = await client.query<{ id: string }>(
+        `SELECT id FROM bookings
+          WHERE trial_class_id = $1 AND student_id = $2
+            AND status IN ('pending_payment', 'confirmed')
+          LIMIT 1`,
+        [input.trialClassId, input.studentId],
+      )
+      throw new DuplicateBookingError(existing.rows[0]?.id)
     }
     throw error
   }

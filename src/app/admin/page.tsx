@@ -1,17 +1,22 @@
 import { withTransaction } from '@/lib/db'
 import { getRoster, listTrialClasses } from '@/lib/booking/service'
+import type { RosterEntry, TrialClassSummary } from '@/lib/types'
 
 export const dynamic = 'force-dynamic'
 
 export default async function AdminPage() {
   const classesWithRosters = await withTransaction(async (client) => {
     const trialClasses = await listTrialClasses(client)
-    return Promise.all(
-      trialClasses.map(async (trialClass) => ({
-        trialClass,
-        roster: await getRoster(client, trialClass.id),
-      })),
-    )
+    // Sequential, never Promise.all: these queries share ONE pooled connection,
+    // and a single pg connection runs one query at a time. Firing them
+    // concurrently overlaps queries on that connection (the pg "client is
+    // already executing a query" deprecation, removed in pg@9). An admin page
+    // renders a handful of classes, so serial reads cost nothing.
+    const rows: { trialClass: TrialClassSummary; roster: RosterEntry[] }[] = []
+    for (const trialClass of trialClasses) {
+      rows.push({ trialClass, roster: await getRoster(client, trialClass.id) })
+    }
+    return rows
   })
 
   return (

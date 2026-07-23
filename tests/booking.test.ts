@@ -54,13 +54,17 @@ describe('createBooking', () => {
     expect(fetched.id).toBe(booking.id)
   })
 
-  it('rejects a second live booking for the same child and class', async () => {
+  it('rejects a second live booking and points at the existing one', async () => {
     // Nadia is already confirmed on the duplicate class in the seed.
-    await expect(
-      withTransaction((c) =>
-        createBooking(c, { studentId: STUDENTS.nadia, trialClassId: CLASSES.duplicate }),
-      ),
-    ).rejects.toBeInstanceOf(DuplicateBookingError)
+    const err = await withTransaction((c) =>
+      createBooking(c, { studentId: STUDENTS.nadia, trialClassId: CLASSES.duplicate }),
+    ).catch((e: unknown) => e)
+
+    expect(err).toBeInstanceOf(DuplicateBookingError)
+    if (!(err instanceof DuplicateBookingError)) throw err
+    // The 409 carries the blocking booking's id so the UI can redirect to it.
+    // Nadia is seeded confirmed on Light and Shadow as booking …405.
+    expect(err.existingBookingId).toBe('44444444-4444-4444-4444-444444444405')
   })
 
   it('allows rebooking after a failed payment', async () => {

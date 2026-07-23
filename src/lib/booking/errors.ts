@@ -4,6 +4,12 @@ export abstract class DomainError extends Error {
   abstract readonly status: number
   abstract readonly code: string
 
+  /** Extra structured fields to include in the error response body. Defaults to
+   *  nothing; subclasses override when they carry data a client can act on. */
+  get details(): Record<string, unknown> | undefined {
+    return undefined
+  }
+
   constructor(message: string) {
     super(message)
     this.name = new.target.name
@@ -24,8 +30,17 @@ export class DuplicateBookingError extends DomainError {
   readonly status = 409
   readonly code = 'duplicate_booking'
 
-  constructor() {
+  /** The live booking that blocked the insert, so the UI can redirect the user
+   *  to it (pay if pending, view status if confirmed) instead of dead-ending.
+   *  Optional: absent if the recovery read found nothing. */
+  constructor(readonly existingBookingId?: string) {
     super('This child already has a live booking for this class.')
+  }
+
+  get details(): Record<string, unknown> | undefined {
+    return this.existingBookingId
+      ? { existingBookingId: this.existingBookingId }
+      : undefined
   }
 }
 
@@ -60,7 +75,7 @@ export function isUniqueViolation(error: unknown, constraint: string): boolean {
 export function toErrorResponse(error: unknown): Response {
   if (isDomainError(error)) {
     return Response.json(
-      { error: { code: error.code, message: error.message } },
+      { error: { code: error.code, message: error.message, ...(error.details ?? {}) } },
       { status: error.status },
     )
   }

@@ -32,6 +32,18 @@ export function BookingForm({
     setBusy(false)
 
     if (!response.ok) {
+      // A duplicate isn't a dead-end: the child already has a live booking for
+      // this class, so send the user to it (Pay buttons if pending, status if
+      // confirmed) rather than showing an error with no way forward.
+      if (
+        isRecord(payload) &&
+        isRecord(payload.error) &&
+        payload.error.code === 'duplicate_booking' &&
+        typeof payload.error.existingBookingId === 'string'
+      ) {
+        router.push(`/bookings/${payload.error.existingBookingId}`)
+        return
+      }
       const message =
         isRecord(payload) &&
         isRecord(payload.error) &&
