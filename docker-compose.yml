@@ -6,7 +6,8 @@ services:
       POSTGRES_USER: ottodot
       POSTGRES_PASSWORD: ottodot
       POSTGRES_DB: ottodot
-    # 5433 on the host so this never collides with a Postgres already on 5432.
+    # 5434 on the host, deliberately not 5432 or 5433, so this never collides
+    # with another Postgres already running on the reviewer's machine.
     ports:
       - "5434:5432"
     healthcheck:

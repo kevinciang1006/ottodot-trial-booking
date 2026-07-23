@@ -33,7 +33,7 @@ No auth, no RLS; a parent is picked from a dropdown.
   README (time spent) and AI_USAGE (rejected output).
 
 ## Commands
-    docker compose up -d    # Postgres 16 on localhost:5433
+    docker compose up -d    # Postgres 16 on localhost:5434
     npm run db:reset        # drop, apply db/schema.sql, apply db/seed.sql
     npm run test            # Vitest against the real database
     npm run dev
