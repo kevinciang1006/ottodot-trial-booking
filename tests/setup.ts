@@ -1,7 +1,9 @@
 import 'dotenv/config'
 import { afterAll, afterEach, beforeEach, expect } from 'vitest'
-import { closePool, getPool } from '@/lib/db'
+import { closePool, getPool, withTransaction } from '@/lib/db'
 import { resetDatabase } from '../scripts/reset-db'
+import { createBooking, payForBooking } from '@/lib/booking/service'
+import type { Booking, PayResult } from '@/lib/types'
 
 /** Seeded IDs, fixed in db/seed.sql. */
 export const PARENTS = {
@@ -31,6 +33,29 @@ export const CLASSES = {
   /** Empty — reserved for the overbooking-under-load test. */
   empty: '33333333-3333-3333-3333-333333333305',
 } as const
+
+/**
+ * Shared test helpers for `createBooking` and `payForBooking`. Each wraps its
+ * call in its own `withTransaction`, which checks out its own pooled client —
+ * required for genuine concurrency in the simultaneous-actor tests, and to
+ * avoid duplicating these wrappers across test files.
+ */
+export async function bookAsUser(
+  studentId: string,
+  trialClassId: string,
+): Promise<Booking> {
+  return withTransaction((c) => createBooking(c, { studentId, trialClassId }))
+}
+
+export async function payAsUser(
+  bookingId: string,
+  idempotencyKey: string,
+  cardToken: string,
+): Promise<PayResult> {
+  return withTransaction((c) =>
+    payForBooking(c, { bookingId, idempotencyKey, cardToken }),
+  )
+}
 
 beforeEach(async () => {
   await resetDatabase()

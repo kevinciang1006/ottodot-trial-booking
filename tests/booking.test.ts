@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { withTransaction } from '@/lib/db'
+import { getPool, withTransaction } from '@/lib/db'
 import {
   createBooking,
   getBooking,
@@ -7,8 +7,12 @@ import {
   listParentsWithStudents,
   listTrialClasses,
 } from '@/lib/booking/service'
-import { DuplicateBookingError, NotFoundError } from '@/lib/booking/errors'
-import { CLASSES, STUDENTS } from './setup'
+import {
+  DuplicateBookingError,
+  IdempotencyKeyReuseError,
+  NotFoundError,
+} from '@/lib/booking/errors'
+import { bookAsUser, CLASSES, payAsUser, STUDENTS } from './setup'
 
 describe('reads', () => {
   it('reports seats remaining from confirmed bookings only', async () => {
@@ -79,6 +83,73 @@ describe('createBooking', () => {
           trialClassId: '33333333-3333-3333-3333-3333333333ff',
         }),
       ),
+    ).rejects.toBeInstanceOf(NotFoundError)
+  })
+})
+
+describe('payForBooking', () => {
+  it('confirms the booking and puts the child on the roster', async () => {
+    const booking = await bookAsUser(STUDENTS.ethan, CLASSES.available)
+    const result = await payAsUser(booking.id, 'happy-1', 'pm_ok')
+
+    expect(result.booking.status).toBe('confirmed')
+    expect(result.outcome).toBe('captured')
+    expect(result.charged).toBe(true)
+
+    const roster = await withTransaction((c) => getRoster(c, CLASSES.available))
+    expect(roster.map((r) => r.studentName)).toContain('Ethan Tan')
+  })
+
+  it('leaves a declined booking off the roster and consumes no seat', async () => {
+    const booking = await bookAsUser(STUDENTS.ethan, CLASSES.available)
+    const result = await payAsUser(booking.id, 'decline-1', 'pm_fail')
+
+    expect(result.booking.status).toBe('payment_failed')
+    expect(result.outcome).toBe('failed')
+    expect(result.charged).toBe(false)
+
+    const roster = await withTransaction((c) => getRoster(c, CLASSES.available))
+    expect(roster.map((r) => r.studentName)).not.toContain('Ethan Tan')
+
+    const classes = await withTransaction((c) => listTrialClasses(c))
+    expect(classes.find((c) => c.id === CLASSES.available)?.confirmedCount).toBe(1)
+
+    // And the child may book again — the partial index excludes payment_failed.
+    const retry = await bookAsUser(STUDENTS.ethan, CLASSES.available)
+    expect(retry.status).toBe('pending_payment')
+  })
+
+  it('replaying the same key charges once and returns the same outcome', async () => {
+    const booking = await bookAsUser(STUDENTS.ethan, CLASSES.available)
+    const first = await payAsUser(booking.id, 'idem-1', 'pm_ok')
+    const second = await payAsUser(booking.id, 'idem-1', 'pm_ok')
+
+    expect(first.booking.status).toBe('confirmed')
+    expect(second.booking.status).toBe('confirmed')
+    expect(second.charged).toBe(true)
+
+    const { rows } = await getPool().query<{ n: number }>(
+      'SELECT count(*)::int AS n FROM payment_attempts WHERE booking_id = $1',
+      [booking.id],
+    )
+    expect(rows[0]?.n).toBe(1)
+  })
+
+  it('rejects an idempotency key already used for a different booking', async () => {
+    const first = await bookAsUser(STUDENTS.ethan, CLASSES.available)
+    const second = await bookAsUser(STUDENTS.daniel, CLASSES.available)
+
+    await payAsUser(first.id, 'shared-key', 'pm_ok')
+
+    // Returning the other booking's outcome would be worse than failing loudly.
+    await expect(
+      payAsUser(second.id, 'shared-key', 'pm_ok'),
+    ).rejects.toBeInstanceOf(IdempotencyKeyReuseError)
+  })
+
+  it('404s on an unknown booking', async () => {
+    await expect(
+      payAsUser('44444444-4444-4444-4444-4444444444ff', 'missing-1', 'pm_ok'),
     ).rejects.toBeInstanceOf(NotFoundError)
   })
 })

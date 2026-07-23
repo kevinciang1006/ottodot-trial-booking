@@ -1,14 +1,18 @@
 import type { PoolClient } from 'pg'
 import {
   DuplicateBookingError,
+  IdempotencyKeyReuseError,
   NotFoundError,
   ValidationError,
   isUniqueViolation,
 } from '@/lib/booking/errors'
+import { authorize, capture, voidAuthorization } from '@/lib/payments/gateway'
 import type {
   Booking,
   BookingStatus,
   ParentWithStudents,
+  PayResult,
+  PaymentOutcome,
   RosterEntry,
   StudentSummary,
   TrialClassSummary,
@@ -205,4 +209,209 @@ export async function listParentsWithStudents(
     email: row.email,
     students: row.students ?? [],
   }))
+}
+
+/** One message per terminal status, shared by fresh results and idempotent
+ *  replays so a replay can never describe the outcome differently. */
+const STATUS_MESSAGES: Record<BookingStatus, string> = {
+  pending_payment: 'Awaiting payment.',
+  confirmed: 'Payment received. The trial class is confirmed.',
+  payment_failed:
+    'Payment was declined. No seat was taken and you were not charged. You can try booking again.',
+  cancelled_class_full:
+    'This class filled up while your payment was being processed. Your card was authorized but never charged, and the authorization has been released.',
+  cancelled: 'This booking was cancelled.',
+}
+
+function toPayResult(booking: Booking, outcome: PaymentOutcome | null): PayResult {
+  return {
+    booking,
+    outcome,
+    charged: booking.status === 'confirmed',
+    message: STATUS_MESSAGES[booking.status],
+  }
+}
+
+async function recordAttempt(
+  client: PoolClient,
+  input: {
+    bookingId: string
+    idempotencyKey: string
+    outcome: PaymentOutcome
+    amountCents: number
+    providerRef: string | null
+  },
+): Promise<void> {
+  await client.query(
+    `INSERT INTO payment_attempts
+       (booking_id, idempotency_key, outcome, amount_cents, provider_ref)
+     VALUES ($1, $2, $3, $4, $5)`,
+    [
+      input.bookingId,
+      input.idempotencyKey,
+      input.outcome,
+      input.amountCents,
+      input.providerRef,
+    ],
+  )
+}
+
+async function setStatus(
+  client: PoolClient,
+  bookingId: string,
+  status: BookingStatus,
+): Promise<Booking> {
+  const result = await client.query<BookingRow>(
+    `UPDATE bookings SET status = $2 WHERE id = $1 RETURNING ${BOOKING_COLUMNS}`,
+    [bookingId, status],
+  )
+  const row = result.rows[0]
+  if (!row) throw new NotFoundError('Booking not found.')
+  return toBooking(row)
+}
+
+async function latestOutcome(
+  client: PoolClient,
+  bookingId: string,
+): Promise<PaymentOutcome | null> {
+  const result = await client.query<{ outcome: PaymentOutcome }>(
+    `SELECT outcome FROM payment_attempts
+      WHERE booking_id = $1
+      ORDER BY created_at DESC, id DESC
+      LIMIT 1`,
+    [bookingId],
+  )
+  return result.rows[0]?.outcome ?? null
+}
+
+/**
+ * Claims a seat and settles payment, in one transaction.
+ *
+ * LOCK ORDER: booking, then class. Always, in every path. That fixed order is
+ * what makes deadlock impossible.
+ *
+ * The sequence is authorize -> claim -> capture rather than charge -> claim.
+ * A payment provider is an external network call and cannot participate in a
+ * database transaction, so capturing money before securing the seat would leave
+ * the race loser charged for a class they never got, and recovery would become
+ * a refund workflow. Splitting authorize from capture moves the money decision
+ * after the seat decision, so the loser's authorization is simply voided.
+ */
+export async function payForBooking(
+  client: PoolClient,
+  input: { bookingId: string; idempotencyKey: string; cardToken: string },
+): Promise<PayResult> {
+  assertUuid(input.bookingId, 'bookingId')
+  if (input.idempotencyKey.trim() === '') {
+    throw new ValidationError('An Idempotency-Key is required.')
+  }
+  if (input.cardToken.trim() === '') {
+    throw new ValidationError('A cardToken is required.')
+  }
+
+  // ---- Lock 1 of 2: the booking. -----------------------------------------
+  // Serializes concurrent retries of the SAME booking against each other.
+  const bookingResult = await client.query<BookingRow>(
+    `SELECT ${BOOKING_COLUMNS} FROM bookings WHERE id = $1 FOR UPDATE`,
+    [input.bookingId],
+  )
+  const bookingRow = bookingResult.rows[0]
+  if (!bookingRow) throw new NotFoundError('Booking not found.')
+
+  // Idempotent replay: this booking already reached a terminal state, so return
+  // that outcome unchanged rather than charging again.
+  if (bookingRow.status !== 'pending_payment') {
+    return toPayResult(
+      toBooking(bookingRow),
+      await latestOutcome(client, bookingRow.id),
+    )
+  }
+
+  // Idempotency key. The unique index on payment_attempts.idempotency_key is
+  // GLOBAL, so a key seen before may belong to another booking entirely.
+  const priorResult = await client.query<{
+    booking_id: string
+    outcome: PaymentOutcome
+  }>(
+    'SELECT booking_id, outcome FROM payment_attempts WHERE idempotency_key = $1',
+    [input.idempotencyKey],
+  )
+  const prior = priorResult.rows[0]
+  if (prior) {
+    if (prior.booking_id !== bookingRow.id) {
+      // Same key, different booking: the caller has a bug. Returning another
+      // booking's outcome would be worse than failing loudly.
+      throw new IdempotencyKeyReuseError()
+    }
+    return toPayResult(toBooking(bookingRow), prior.outcome)
+  }
+
+  // Plain read, NO lock. Reading the price must not take the seat gate: a card
+  // that is about to be declined has no business contending for the class row.
+  const priceResult = await client.query<{ price_cents: number }>(
+    'SELECT price_cents FROM trial_classes WHERE id = $1',
+    [bookingRow.trial_class_id],
+  )
+  const priceRow = priceResult.rows[0]
+  if (!priceRow) throw new NotFoundError('Trial class not found.')
+
+  const auth = await authorize(priceRow.price_cents, input.cardToken)
+
+  if (!auth.ok) {
+    await recordAttempt(client, {
+      bookingId: bookingRow.id,
+      idempotencyKey: input.idempotencyKey,
+      outcome: 'failed',
+      amountCents: priceRow.price_cents,
+      providerRef: null,
+    })
+    // NO CLASS ROW IS TOUCHED. A declined card never consumes a seat and never
+    // contends for the class lock.
+    return toPayResult(await setStatus(client, bookingRow.id, 'payment_failed'), 'failed')
+  }
+
+  // ---- Lock 2 of 2: the class. The seat gate. -----------------------------
+  // Concurrent claims on the same class serialize HERE. Taken after the booking
+  // lock, always.
+  const classResult = await client.query<{ capacity: number }>(
+    'SELECT capacity FROM trial_classes WHERE id = $1 FOR UPDATE',
+    [bookingRow.trial_class_id],
+  )
+  const classRow = classResult.rows[0]
+  if (!classRow) throw new NotFoundError('Trial class not found.')
+
+  // Counted under the lock, from confirmed bookings — the single source of truth.
+  const countResult = await client.query<{ confirmed: number }>(
+    `SELECT count(*)::int AS confirmed
+       FROM bookings
+      WHERE trial_class_id = $1 AND status = 'confirmed'`,
+    [bookingRow.trial_class_id],
+  )
+  const confirmed = countResult.rows[0]?.confirmed ?? 0
+
+  if (confirmed >= classRow.capacity) {
+    // Lost the race. Void the authorization so no money ever moves.
+    await voidAuthorization(auth.providerRef)
+    await recordAttempt(client, {
+      bookingId: bookingRow.id,
+      idempotencyKey: input.idempotencyKey,
+      outcome: 'voided',
+      amountCents: priceRow.price_cents,
+      providerRef: auth.providerRef,
+    })
+    return toPayResult(
+      await setStatus(client, bookingRow.id, 'cancelled_class_full'),
+      'voided',
+    )
+  }
+
+  await capture(auth.providerRef)
+  await recordAttempt(client, {
+    bookingId: bookingRow.id,
+    idempotencyKey: input.idempotencyKey,
+    outcome: 'captured',
+    amountCents: priceRow.price_cents,
+    providerRef: auth.providerRef,
+  })
+  return toPayResult(await setStatus(client, bookingRow.id, 'confirmed'), 'captured')
 }
