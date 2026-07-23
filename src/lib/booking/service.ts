@@ -120,6 +120,21 @@ export async function getBooking(
   return toBooking(row)
 }
 
+export async function getStudent(
+  client: PoolClient,
+  studentId: string,
+): Promise<StudentSummary> {
+  assertUuid(studentId, 'studentId')
+  const result = await client.query<{
+    id: string
+    full_name: string
+    grade_level: number
+  }>('SELECT id, full_name, grade_level FROM students WHERE id = $1', [studentId])
+  const row = result.rows[0]
+  if (!row) throw new NotFoundError('Student not found.')
+  return { id: row.id, fullName: row.full_name, gradeLevel: row.grade_level }
+}
+
 export async function listTrialClasses(
   client: PoolClient,
 ): Promise<TrialClassSummary[]> {

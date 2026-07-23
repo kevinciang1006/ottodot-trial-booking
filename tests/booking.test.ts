@@ -4,6 +4,7 @@ import {
   createBooking,
   getBooking,
   getRoster,
+  getStudent,
   listParentsWithStudents,
   listTrialClasses,
 } from '@/lib/booking/service'
@@ -40,6 +41,16 @@ describe('reads', () => {
       'Nadia Rahman',
       'Omar Rahman',
     ])
+  })
+
+  it('returns a student by id, and 404s on an unknown one', async () => {
+    const student = await withTransaction((c) => getStudent(c, STUDENTS.nadia))
+    expect(student.fullName).toBe('Nadia Rahman')
+    expect(student.gradeLevel).toBe(4)
+
+    await expect(
+      withTransaction((c) => getStudent(c, '22222222-2222-2222-2222-2222222222ff')),
+    ).rejects.toBeInstanceOf(NotFoundError)
   })
 })
 
