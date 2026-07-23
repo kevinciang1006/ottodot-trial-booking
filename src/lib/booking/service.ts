@@ -452,7 +452,14 @@ export async function payForBooking(
     // The attempt was never recorded, so the authorization is still open —
     // neither captured nor voided. Release it before propagating so nothing
     // is stranded.
-    await voidAuthorization(auth.providerRef)
+    try {
+      await voidAuthorization(auth.providerRef)
+    } catch {
+      // A failed void must not replace the error the caller needs to see. That
+      // would turn the typed 409 this whole branch exists to produce back into
+      // a 500. An unreleased authorization is a reconciliation concern, and it
+      // expires on its own.
+    }
     throw error
   }
   await capture(auth.providerRef)
