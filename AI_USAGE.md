@@ -88,12 +88,12 @@ and a stranded authorization.
   exactly one `payment_attempts` row confirmed via `psql`, and an empty roster for the class
   holding a `payment_failed` booking. Plus 404 on an unknown booking, 400 on a malformed
   UUID, and 400 on a body missing `cardToken`.
-- **A UI pass over the full flow** — book, pay with a declined card, rebook, pay
+- **A curl-driven pass over the UI flow** — book, pay with a declined card, rebook, pay
   successfully, check the roster — driven with curl against a running dev server and
   verified against the server-rendered HTML. No browser was available in this environment,
-  so the two purely client-side behaviours (the parent-select `onChange` re-render and the
-  post-booking `router.push`) were verified by reading the code rather than by clicking.
-  That is the one gap in this verification and it is stated rather than glossed over.
+  so the client-only behaviour in `booking-form.tsx` and `pay-buttons.tsx` was verified by
+  reading the code rather than by clicking. That is the one gap in this verification and it
+  is stated rather than glossed over.
 - **A clean-checkout run at the end**: `docker compose down -v`, `docker compose up -d`,
   `rm -rf node_modules .next`, `npm install`, `npm run db:reset`, `npm run test`,
   `npm run typecheck`, `npm run lint`, `npm run build`. Every command exited 0 and the

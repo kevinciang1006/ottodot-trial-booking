@@ -5,7 +5,7 @@ The interesting part is what happens when two parents pay for the last seat at t
 moment — and the answer this build gives is that **correctness lives in Postgres**.
 Constraints and locks decide; application code is a thin, testable wrapper over them.
 
-Start with [Last-Seat Race](#last-seat-race) and [Backend Design](#backend-design) if you
+Start with [Backend Design](#backend-design) and [Last-Seat Race](#last-seat-race) if you
 only have a few minutes.
 
 ---
@@ -21,15 +21,48 @@ npm run test              # 15 tests against the real database
 npm run dev               # http://localhost:3000
 ```
 
-Postgres binds to host port **5434**, not 5432 or 5433 — both were already taken on the
-development machine, and 5434 makes a collision on yours less likely. If it collides
-anyway, change the port in `docker-compose.yml` and in `DATABASE_URL`.
+Postgres binds to host port **5434** to avoid colliding with an existing Postgres on 5432
+or 5433. If it collides anyway, change the port in `docker-compose.yml` and in
+`DATABASE_URL`.
 
 **Any Postgres works.** All access is raw SQL over `pg` with a `DATABASE_URL`, so a
 Supabase or Neon connection string drops straight in — with one caveat: the pool sets no
 `ssl` option, so append `?sslmode=require` to a hosted connection string.
 
 Three pages: `/` (book), `/bookings/<id>` (status and pay), `/admin` (rosters).
+
+### Verify it yourself with curl
+
+The backend is the part being graded, so it should be checkable without the UI. These five
+requests use the fixed UUIDs from `db/seed.sql` against a freshly reset database
+(`npm run db:reset`) and a running `npm run dev`:
+
+```bash
+# 1. The race class has exactly one seat left.
+curl http://localhost:3000/api/trial-classes
+# → class 33333333-3333-3333-3333-333333333302 has "seatsRemaining":1
+
+# 2. Nadia is already confirmed on this class — booking her again is a duplicate.
+curl -X POST http://localhost:3000/api/bookings -H 'Content-Type: application/json' -d \
+  '{"studentId":"22222222-2222-2222-2222-222222222201","trialClassId":"33333333-3333-3333-3333-333333333303"}'
+# → 409 {"error":{"code":"duplicate_booking", ...}}
+
+# 3. Ethan claims the race class's last seat.
+curl -X POST http://localhost:3000/api/bookings -H 'Content-Type: application/json' -d \
+  '{"studentId":"22222222-2222-2222-2222-222222222204","trialClassId":"33333333-3333-3333-3333-333333333302"}'
+# → 201 {"booking":{...,"status":"pending_payment",...}} — keep the returned `id` for step 4
+
+# 4. Pay for it, then replay the identical request.
+curl -X POST http://localhost:3000/api/bookings/<id-from-step-3>/pay \
+  -H 'Content-Type: application/json' -H 'Idempotency-Key: demo-1' -d '{"cardToken":"pm_ok"}'
+# → 200 {"booking":{"status":"confirmed",...},"outcome":"captured","charged":true,...}
+# Replaying the exact same command returns a byte-for-byte identical response, and
+# payment_attempts still holds exactly one row for that booking — the idempotency key decided.
+
+# 5. The class with a payment_failed booking has nobody on its roster.
+curl http://localhost:3000/api/trial-classes/33333333-3333-3333-3333-333333333304/roster
+# → {"roster":[]}
+```
 
 ---
 
@@ -87,7 +120,7 @@ Three pages: `/` (book), `/bookings/<id>` (status and pay), `/admin` (rosters).
 |---|---|
 | Correctness enforced in Postgres, not in application code | A `SELECT`-then-`INSERT` check has a TOCTOU window two concurrent requests can both pass. A unique index does not. |
 | Raw SQL over `pg`, no ORM | The correctness argument *is* the SQL — partial indexes, `FOR UPDATE`, lock ordering. An ORM hides exactly the thing being graded. |
-| Seats derived from confirmed bookings on every read; no counter column | One source of truth that cannot drift. A denormalized counter is faster but adds a second truth (see [alternatives rejected](#alternatives-rejected)). |
+| Seats derived from confirmed bookings on every read; no counter column | One source of truth that cannot drift — full tradeoff in [alternatives rejected](#alternatives-rejected). |
 | Service functions take a `PoolClient`, never issue `BEGIN`/`COMMIT` | `withTransaction` owns the transaction. Each call checks out its own pooled client, so concurrent callers automatically get separate connections — which is what makes the concurrency tests genuinely concurrent rather than serialized on one wire. |
 | **Always lock booking, then class** | A fixed global lock order is what makes deadlock impossible. Every code path obeys it, no exceptions. |
 | `authorize` → claim seat → `capture` | An external network call cannot participate in a database transaction. Capturing before securing the seat charges the race loser for a class they never got, and recovery becomes a refund workflow. |
@@ -177,9 +210,8 @@ CREATE UNIQUE INDEX payment_attempts_idem
 `bookings_class_status` is a third index, purely an access path for the count-under-lock
 and the roster query — it enforces nothing.
 
-Seat capacity is deliberately **not** denormalized into a `confirmed_seats` column.
-Confirmed bookings are the single source of truth, and `seats_remaining` is computed on
-every read.
+Seat capacity is deliberately **not** denormalized into a `confirmed_seats` column — see
+[alternatives rejected](#alternatives-rejected) for why.
 
 ### Endpoints
 
@@ -221,7 +253,7 @@ but can never hold two live bookings for one class.
 
 ### Payment-failure handling
 
-A declined authorization is handled **before the class row is ever touched**: the attempt
+A declined authorization is handled **without ever locking or writing the class row**: the attempt
 is recorded as `failed`, the booking becomes `payment_failed`, and the transaction commits.
 A card that is about to bounce never contends for the seat gate, never consumes a seat, and
 never reaches a roster — `getRoster` filters on `status = 'confirmed'`, and so does the
@@ -234,7 +266,7 @@ never reaches a roster — `getRoster` filters on `status = 'confirmed'`, and so
 | Class appears full | Greys out the button | — | — |
 | Duplicate booking | — | Translates 23505 → 409 | `bookings_active_unique` **decides** |
 | Overbooking past capacity | — | Counts under lock | `FOR UPDATE` on the class **decides** |
-| Payment failure off roster | — | Sets `payment_failed`, touches no class row | Roster query filters `status = 'confirmed'` |
+| Payment failure off roster | — | Sets `payment_failed`, never locks the class row | Roster query filters `status = 'confirmed'` |
 | Double-charge on replay | Sends a stable key | Returns the prior outcome | `payment_attempts_idem` **decides** |
 
 Read the "UI" column as *convenience only*. A greyed-out button avoids an obviously wasted
@@ -268,7 +300,7 @@ Everything below happens inside one transaction on `POST /api/bookings/:id/pay`:
 4. Read the price with a **plain, unlocked** `SELECT`. Reading a price must not take the
    seat gate.
 5. **Authorize** with the gateway. Declined → record `failed`, set `payment_failed`,
-   commit, return. **No class row is touched.**
+   commit, return. **The class row is never locked, and nothing about the class changes.**
 6. `SELECT … FROM trial_classes WHERE id = $1 FOR UPDATE` — **lock 2, the seat gate.**
    Concurrent claims on the same class serialize here.
 7. `SELECT count(*) FROM bookings WHERE trial_class_id = $1 AND status = 'confirmed'`,
@@ -307,8 +339,8 @@ simply voided and nothing ever appears on their statement.
   not reserving. It is the brief's scenario, and the mitigation is a clear message rather
   than a hidden failure. If the `cancelled_class_full` rate ever climbs, the answer is seat
   holds — see [what to monitor](#what-to-monitor-after-release).
-- **The residual window on `capture()`** described above: a stranded authorization that
-  expires on its own.
+- **The residual window on `capture()`** — see [order of operations on the confirmed
+  path](#order-of-operations-on-the-confirmed-path).
 
 ### The foreign-key lock interaction
 
@@ -368,6 +400,9 @@ adding features here would be a failure mode, not a bonus. Cut on purpose:
 - Seat holds with a TTL and the expiry job they require.
 - Rate limiting.
 - Styling beyond plain Tailwind, and any component library.
+- Fixing `npm audit`'s 3 transitive advisories (`next`/high, `postcss`/moderate,
+  `sharp`/high): the only fix npm offers is downgrading `next` to 9.3.3, and the advisory
+  range extends through Next 16, so none is actionable at the pinned Next 15 version.
 
 ---
 
@@ -395,9 +430,10 @@ adding features here would be a failure mode, not a bonus. Cut on purpose:
 
 1. **Seat holds with a TTL plus an expiry job** — the real fix for users losing a seat at
    the payment screen, and the thing a rising `cancelled_class_full` rate would justify.
-2. **A real provider with webhooks and a transactional outbox** — closes the
-   capture-throws window by making the money state reconcilable out of band instead of
-   depending on one in-transaction call.
+2. **A real provider with webhooks and a transactional outbox** — closes the residual
+   window described in [order of operations on the confirmed
+   path](#order-of-operations-on-the-confirmed-path) by making the money state
+   reconcilable out of band instead of depending on one in-transaction call.
 3. **Waitlist with auto-promotion** when a confirmed booking cancels.
 4. **Admin cancel and refund**, which is what finally activates the `cancelled` status.
 5. **A load test on lock contention**, to settle the counter-versus-lock tradeoff with data

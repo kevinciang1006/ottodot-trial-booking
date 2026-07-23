@@ -63,7 +63,7 @@ beforeEach(async () => {
 
 /**
  * THE global invariant, asserted after EVERY test in EVERY file — not as a
- * single test case. Written this way it guards all six tests, not just the two
+ * single test case. Written this way it guards all 15 tests, not just the two
  * concurrency cases that were designed to stress it.
  */
 afterEach(async () => {
