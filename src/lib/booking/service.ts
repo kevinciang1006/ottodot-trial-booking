@@ -394,8 +394,9 @@ export async function payForBooking(
       amountCents: priceRow.price_cents,
       providerRef: null,
     })
-    // NO CLASS ROW IS TOUCHED. A declined card never consumes a seat and never
-    // contends for the class lock.
+    // THE CLASS ROW IS NEVER LOCKED OR WRITTEN. The unlocked price read above is
+    // the only contact with it; a declined card never consumes a seat and never
+    // contends for the seat gate.
     return toPayResult(await setStatus(client, bookingRow.id, 'payment_failed'), 'failed')
   }
 
