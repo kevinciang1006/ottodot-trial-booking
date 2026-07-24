@@ -3,8 +3,8 @@
 **Design spec.** Date: 2026-07-23. Timebox: 3–4 hours.
 Deliverable: GitHub repo with `README.md`, `AI_USAGE.md`, implementation, seed data, tests.
 
-This spec supersedes `Ottodot_TakeHome_PRD.md` (kept in `.local-refs/`). It carries that
-document forward unchanged except for four deltas, each marked **[Δ]** and justified inline.
+This spec supersedes the take-home brief's own PRD document. It carries that document
+forward unchanged except for four deltas, each marked **[Δ]** and justified inline.
 
 ---
 
@@ -271,8 +271,11 @@ Tailwind only. Legible, unstyled-adjacent. Do not spend time here.
 
 The concurrency tests are the ones a reviewer will actually read.
 
-Six named cases, covering the brief's seventh requirement — the capacity invariant — as a
-global assertion rather than a single test (see below).
+Six named cases below, covering the brief's seventh requirement — the capacity invariant — as
+a global assertion rather than a single test (see below). As built, several of these split
+naturally into more than one assertion and a third concurrency test was added (cross-booking
+idempotency-key reuse), landing the shipped suite at 15 tests across these two files — see
+`README.md` and `AI_USAGE.md` for the final count and breakdown.
 
 `tests/booking.test.ts`:
 
@@ -291,9 +294,9 @@ global assertion rather than a single test (see below).
    exactly 4 `confirmed` and 2 `cancelled_class_full`.
 
 **Invariant sweep** — `expect(no class has confirmed bookings exceeding capacity)`, run as
-an `afterEach` in **both** files. Written this way it guards all six cases, not just the
-two that were designed to stress it. A single test asserting the invariant once would only
-prove it for whatever state that test happened to leave behind.
+an `afterEach` in **both** files. Written this way it guards every test in the shipped
+suite, not just the two (now three) that were designed to stress it. A single test asserting
+the invariant once would only prove it for whatever state that test happened to leave behind.
 
 ### [Δ2] Test architecture requirements
 
@@ -426,8 +429,8 @@ rejected," write `<!-- HUMAN: fill this in with the real instance -->` and leave
 ## 17. Done criteria
 
 - `docker compose up` → `npm run db:reset` → `npm run test` passes from a clean checkout.
-- All six test cases green — including both concurrency tests — with the capacity invariant
-  asserted after every one of them.
+- All 15 shipped tests green — including all three concurrency tests — with the capacity
+  invariant asserted after every one of them.
 - `npm run build` and `tsc --noEmit` clean.
 - No placeholders anywhere except the two explicitly marked human fields (README time
   spent, AI_USAGE rejected-output section).
