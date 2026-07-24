@@ -63,7 +63,7 @@ export default async function BookingPage({
           <dd className="inline font-mono">{booking.status}</dd>
         </div>
       </dl>
-      <p className="border bg-gray-500 p-3">{STATUS_MESSAGES[booking.status]}</p>
+      <p className="border bg-gray-200 p-3">{STATUS_MESSAGES[booking.status]}</p>
 
       {booking.status === 'pending_payment' ? (
         <PayButtons bookingId={booking.id} />

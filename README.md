@@ -17,7 +17,7 @@ docker compose up -d      # Postgres 16, host port 5434
 cp .env.example .env
 npm install
 npm run db:reset          # drop schema, apply db/schema.sql, apply db/seed.sql
-npm run test              # 15 tests against the real database
+npm run test              # 16 tests against the real database
 npm run dev               # http://localhost:3000
 ```
 
@@ -83,7 +83,7 @@ curl http://localhost:3000/api/trial-classes/33333333-3333-3333-3333-33333333330
 - **Three plain Tailwind pages** — deliberately unpolished, per the brief.
 - **Seed data** (`db/seed.sql`) — fixed UUIDs; a class with one seat left, a class with a
   duplicate to demonstrate, a class with a failed payment sitting off the roster.
-- **15 tests** across two files (12 in `tests/booking.test.ts`, 3 in
+- **16 tests** across two files (13 in `tests/booking.test.ts`, 3 in
   `tests/concurrency.test.ts`), run by Vitest against a real Postgres, plus a capacity
   invariant asserted in an `afterEach` that runs after **every one of them**.
 
@@ -91,7 +91,12 @@ curl http://localhost:3000/api/trial-classes/33333333-3333-3333-3333-33333333330
 
 ## Time spent
 
-**Time spent:** ⚠️ TO BE FILLED IN BEFORE SUBMITTING <!-- HUMAN: replace this entire line's value with the real number -->
+Roughly **4 hours**, within the brief's cap:
+
+- **~45 min** — reading the brief and writing the design spec.
+- **~2 hours** — implementation: schema, service layer, API routes, seed data, and UI.
+- **~45 min** — tests and the mutation check that proves they can fail.
+- **~30 min** — this README and `AI_USAGE.md`.
 
 ---
 

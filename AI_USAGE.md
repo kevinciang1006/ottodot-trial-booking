@@ -69,7 +69,7 @@ and a stranded authorization.
 
 ## How I verified the final implementation
 
-- **Test suite against real Postgres, not mocks.** `npm run test` → 15 tests, 12 in
+- **Test suite against real Postgres, not mocks.** `npm run test` → 16 tests, 13 in
   `tests/booking.test.ts` and 3 in `tests/concurrency.test.ts`, plus a capacity invariant
   asserted in an `afterEach` that runs after every one of them. The concurrency is genuine:
   `withTransaction` checks out its own pooled client per call, and the pool `max` is 10
@@ -78,7 +78,7 @@ and a stranded authorization.
   temporarily removed from the class lock. Both capacity tests then failed with 5-of-4 and
   6-of-4 confirmed, and the shared invariant `afterEach` failed alongside them — totals
   that are unreachable without genuine transaction overlap. `FOR UPDATE` was restored
-  immediately and the suite went back to 15/15. The `pool max: 1` variant of the same check
+  immediately and the suite went back to green. The `pool max: 1` variant of the same check
   was deliberately *not* run: six actors serialized onto one connection still total
   correctly, so it would produce a false green and prove nothing.
 - **A curl walkthrough of every endpoint** against a running `npm run dev`, from a freshly
@@ -98,5 +98,5 @@ and a stranded authorization.
 - **A clean-checkout run at the end**: `docker compose down -v`, `docker compose up -d`,
   `rm -rf node_modules .next`, `npm install`, `npm run db:reset`, `npm run test`,
   `npm run typecheck`, `npm run lint`, `npm run build`. Every command exited 0 and the
-  suite was 15/15 — so a reviewer cloning this repo hits no state that only exists on the
+  suite was all green — so a reviewer cloning this repo hits no state that only exists on the
   machine it was built on.
